@@ -1,25 +1,18 @@
-openBlas = cdll.LoadLibrary('./libopenblas.so')
-
 import os
 import sys
 import math
 import networkx as nx
-from itertools import product
-from multiprocessing import Process, sharedctypes
-
-parallelism = 8
+import numpy as np
 
 class DnnInferenceEngine(object):
-    def __init__(self, graph, debug):
+    def __init__(self, graph):
         self.g = graph
-        self.debug = debug
 
     def run(self, tin):
         self.g.in_node.set_input(tin)
         out = {}
         currents = [self.g.in_node]
         done = set()
-        counter = 0
         while (len(currents) != 0):
             nexts = []
             for current in currents:
@@ -31,15 +24,13 @@ class DnnInferenceEngine(object):
                         skip_current = True
                 if skip_current:
                     continue
-                current.run(counter)
-                if not isinstance(current, Input):
-                    counter += 1
+                current.run()
                 if self.g.is_out_node(current):
                     out = current.result
                 done.add(current)
                 for successor in self.g.G.successors(current):
                     nexts.append(successor)
-            currents = nexts
+            currents = nexts[:]
         return out
 
 class DnnGraphBuilder(object):
@@ -61,10 +52,7 @@ class DnnGraphBuilder(object):
         self.out_node = node
 
     def is_out_node(self, node):
-        if self.out_node is node:
-            return True
-        else:
-            return False
+        return self.out_node is node
 
     def get_name(self, layer_name):
         name = layer_name + "_" + str(self.name_num[layer_name])
@@ -106,237 +94,200 @@ class DnnNode(object):
     def __init__(self):
         pass
 
-    def run(self, counter):
+    def run(self):
         self.result = None 
+
+#
+# Complete below classes.
+#
 
 class Conv2D(DnnNode):
     def __init__(self, name, in_node, kernel, strides, padding):
-        self.name = name
-        
-        # input node
         self.in_node = in_node
+        batch, in_height, in_width, in_channels = in_node.out_shape
+        filter_height, filter_width, kernel_in_channels, out_channels = kernel.shape
 
-        # weights
-        self.weights = kernel
-        assert len(self.weights.shape) == 4
-        if len(self.in_node.result.shape) < 3:
-            input_channels = 1
-        else:
-            input_channels = self.in_node.result.shape[-1]
+        assert in_channels == kernel_in_channels, \
+        "Shape of filters must be same to number of input channels, %d is not equal to %d" % (kernel_in_channels, in_channels)
 
-        # strides
-        if strides is None:
-            strides = (1,1,1,1)
-        assert len(strides) == len(self.in_node.result.shape)
+        assert padding in ["SAME", "VALID"], \
+        "Invalid padding name: %s, should be either SAME or VALID" % padding
+
+        self.name = name
+        print(self.name)
+        self.kernel = kernel
+        self.padding = (padding == "SAME")
         self.strides = strides
 
-        # padding
-        if padding == 'SAME':
-            self.pad = (
-                    (0,0),
-                    (self.weights.shape[0]//2, self.weights.shape[0]//2),
-                    (self.weights.shape[1]//2, self.weights.shape[1]//2),
-                    (0,0)
-                    )
-        elif padding == 'VALID':
-            self.pad = ((0,0), (0,0), (0,0), (0,0))
+        self.pad_h = 0
+        self.pad_w = 0
+        if self.padding:
+            # ((s-1) * x + k -s)/ 2
+            # to avoid  checking extra cases, we will not divide by two
+            self.pad_h = ((self.strides[1] - 1) * in_height + filter_height - self.strides[1])
+            self.pad_w = ((self.strides[2] - 1) * in_width + filter_width - self.strides[2])
+        output_height  = int(((in_height - filter_height + self.pad_h) / self.strides[1]) + 1)
+        output_width   = int(((in_width - filter_width + self.pad_w) / self.strides[2]) + 1)
+        self.prev_res = np.zeros((batch, in_height + self.pad_h, in_width + self.pad_w, in_channels))
+        self.result = np.zeros((batch, output_height, output_width, out_channels))
+        self.out_shape = self.result.shape
+        self.filter_height, self.filter_width, self.in_channels, out_channels = kernel.shape
+
+    def run(self):
+        filter_height, filter_width, in_channels, out_channels = self.kernel.shape
+        batch, in_height, in_width, in_channels = self.in_node.out_shape
+        if self.pad_h == 0 and self.pad_w == 0:
+            self.prev_res = self.in_node.result
         else:
-            assert len(padding) == 2
-            self.pad = padding
-            
-        ptin = np.pad(self.in_node.result, self.pad, mode='constant')
-        self.PW = ptin.shape[1]
-        self.PH = ptin.shape[2]
-        self.KW = self.weights.shape[0]
-        self.KH = self.weights.shape[1]
-        self.IC = self.weights.shape[2]
-        self.OC = self.weights.shape[3]
-        self.SW = self.strides[1]
-        self.SH = self.strides[2]
-        self.OW = int((self.PW - self.KW) / self.SW + 1)
-        self.OH = int((self.PH - self.KH) / self.SH + 1)
+            self.prev_res[:, self.pad_h//2 : -((self.pad_h+1)//2), self.pad_w//2 : -((self.pad_w + 1)//2), :] = self.in_node.result
+        batch, output_height, output_width, out_channels = self.out_shape
 
-        self.result = np.zeros((1, self.OW, self.OH, self.OC))
-        tmp_result = np.ctypeslib.as_ctypes(self.result)
-        self.shm_result = sharedctypes.RawArray(tmp_result._type_, tmp_result)
-
-    def run(self, counter):
-        ptins = []
-        for i in range(0, parallelism):
-            ptins.append(np.pad(self.in_node.result, self.pad, mode='constant'))
-        for chunk in range(0, int(self.OC / parallelism) + 1):
-            pool = [Process(target=self.run_for_oc, args=(ptins[k], chunk, k)) for k in range(min(parallelism * (chunk+1), self.OC) - parallelism * chunk)]
-            for j in range(min(parallelism * (chunk + 1), self.OC) - parallelism * chunk):
-                pool[j].start()
-            for p in pool:
-                p.join()
-        self.result = np.ctypeslib.as_array(self.shm_result)
-
-    def run_for_oc(self, ptin, chunk, k):
-        oc = chunk * parallelism + k
-        shared_result = np.ctypeslib.as_array(self.shm_result)       
-
-        for ic in range(0, self.IC):
-            for ow in range(0, self.OW):
-                for oh in range(0, self.OH):
-                    for ii, i in enumerate(range(self.SW * ow, self.SW * ow + self.KW)):
-                        for jj, j in enumerate(range(self.SH * oh, self.SH * oh + self.KH)):
-                            shared_result[0, ow, oh, oc] += ptin[0, i, j, ic] * self.weights[ii, jj, ic, oc]
+        for b in range(batch):
+            for i in range(output_height):
+                for j in range(output_width):
+                    for k in range(out_channels):
+                        # can be multiprocessed
+                        for h in range(filter_height):
+                            for w in range(filter_width):
+                                for q in range(in_channels):
+                                    self.result[b, i, j, k] += \
+                                        (self.prev_res[b, self.strides[1] * i + h, self.strides[2] * j + w, q] * 
+                                            self.kernel[h, w, q, k])
 
 class BiasAdd(DnnNode):
     def __init__(self, name, in_node, biases):
+        self.in_node = in_node
+        batch, in_height, in_width, in_channels = in_node.out_shape
+        assert in_channels == biases.shape[0], \
+        "Shape of biases must be equal to number of input channels, %d is not equal to %d" % (biases.shape[0], in_channels)
+
+        self.biases = biases
         self.name = name
+        print(self.name)
+        self.result = np.zeros(in_node.out_shape)
+        self.out_shape = self.result.shape
+        self.prev_res= np.zeros(in_node.out_shape)
 
-        self.in_node = in_node 
-
-        tin = self.in_node.result
-        self.OW = tin.shape[1]
-        self.OH = tin.shape[2]
-        self.OC = tin.shape[3]
-
-        self.biases = biases 
-        assert self.biases.shape[-1] == self.OC 
-
-        self.result = self.in_node.result 
-
-    def run(self, counter):
-        tin = self.in_node.result
-        self.result = np.zeros((1, self.OW, self.OH, self.OC))
-        for ow in range(0, self.OW):
-            for oh in range(0, self.OH):
-                for oc in range(0, self.OC):
-                    self.result[0][ow][oh][oc] = tin[0][ow][oh][oc] + self.biases[oc]
-
+    def run(self):
+        self.prev_res = self.in_node.result
+        batch, output_height, output_width, out_channels = self.out_shape
+        for b in range(batch):
+            for h in range(output_height):
+                for w in range(output_width):
+                    for c in range(out_channels):
+                        self.result[b, h, w, :] = self.prev_res[b, h, w, :] + self.biases
 
 class MaxPool2D(DnnNode):
     def __init__(self, name, in_node, ksize, strides, padding):
-        self.name = name
-
-        # input node 
         self.in_node = in_node
+        batch, in_height, in_width, in_channels = in_node.out_shape
+        out_channels = in_channels
+        assert padding in ["SAME", "VALID"], \
+        "Invalid padding name: %s, should be either SAME or VALID" % padding
 
-        tin = self.in_node.result
-        IW = tin.shape[1]
-        IH = tin.shape[2]
-        self.OC = tin.shape[3]
-
-        # pooling kernel size
-        assert len(ksize) == len(self.in_node.result.shape)
+        self.strides = strides
         self.ksize = ksize
+        self.name = name
+        print(self.name)
+        
+        self.padding = (padding == "SAME")
 
-        # stride
-        self.stride = strides
-
-        if padding == 'VALID':
-            self.pad = (
-                    (0,0),
-                    (0,0),
-                    (0,0),
-                    (0,0))
-        elif padding == 'SAME':
-            w = self.in_node.result.shape[1]
-            h = self.in_node.result.shape[2]
-
-            out_w = math.ceil(float(w) / float(self.stride[1]))
-            out_h = math.ceil(float(h) / float(self.stride[2]))
-            pad_along_w = max(int((w - self.ksize[1]) / self.stride[1]) + 1 - w, 0)
-            pad_along_h = max(int((h - self.ksize[2]) / self.stride[2]) + 1 - h, 0)
-            pad_left = pad_along_w // 2
-            pad_right = pad_along_w - pad_left
-            pad_top = pad_along_h // 2
-            pad_bottom = pad_along_h - pad_top
-            self.pad = (
-                    (0,0),
-                    (pad_left,pad_right),
-                    (pad_top,pad_bottom),
-                    (0,0))
+        pad_h = 0
+        pad_w = 0
+        if self.padding:
+            # ((s-1) * x + k -s)/ 2
+            pad_h = self.ksize[1] - 1
+            pad_w = self.ksize[2] - 1
+        self.prev_res = np.zeros((batch, in_height + pad_h, in_width + pad_w, in_channels))
+        output_height  = int((in_height - self.ksize[1] + pad_h) / self.strides[1] + 1)
+        output_width   = int((in_width - self.ksize[2] + pad_w) / self.strides[2] + 1)
+        self.result = np.zeros((batch, output_height, output_width, out_channels))
+        self.out_shape = self.result.shape
+        
+    def run(self):
+        batch, in_height, in_width, in_channels = self.in_node.out_shape
+        pad_h = 0
+        pad_w = 0
+        if self.padding:
+            pad_h = self.ksize[1] - 1
+            pad_w = self.ksize[2] - 1
+            self.prev_res[:, pad_h//2 : -((pad_h+1)//2), pad_w//2 : -((pad_w+1)//2), :] = self.in_node.result
         else:
-            raise Exception("Unexpected padding mode: {}".format(padding))	
+            self.prev_res = self.in_node.result
+        batch, in_height, in_width, in_channels = self.prev_res.shape
+        batch, output_height, output_width, out_channels = self.out_shape
 
-        ptin= np.pad(self.in_node.result, self.pad, mode='constant')
-        self.PW = ptin.shape[1]
-        self.PH = ptin.shape[2]
-        self.result = np.zeros((1, int(self.PW / self.stride[1]), int(self.PH / self.stride[2]), self.OC))
+        for b in range(batch):
+            for i in range(output_height):
+                for j in range(output_width):
+                    for c in range(out_channels):
+                        self.result[b, i, j, c] = \
+                            np.amax(self.prev_res[b, i * self.strides[1] : i * self.strides[1] + self.ksize[1], 
+                                    j * self.strides[2] : j * self.strides[2] + self.ksize[2], c])
 
-    def run(self, counter):
-        ptin = np.pad(self.in_node.result, self.pad, mode='constant')
-        for oc in range(0, self.OC):
-            for pw in range(0, self.PW, self.stride[1]):
-                for ph in range(0, self.PH, self.stride[2]):
-                    tmp = ptin[0, pw, ph, oc]
-                    for i in range(0, self.ksize[1]):
-                        if pw + i >= self.PW:
-                            break
-                        for j in range(0, self.ksize[2]):
-                            if ph + j >= self.PH:
-                                break
-                            if ptin[0, pw + i, ph + j, oc] > tmp:
-                                tmp = ptin[0, pw + i, ph + j, oc] 
-                    self.result[0][int(pw/self.stride[1])][int(ph/self.stride[2])][oc] = tmp
 
 class BatchNorm(DnnNode):
     def __init__(self, name, in_node, mean, variance, gamma, epsilon):
-        self.name = name
-
         self.in_node = in_node
+        batch, in_height, in_width, in_channels = in_node.out_shape
 
-        tin = self.in_node.result
-        self.OW = tin.shape[1]
-        self.OH = tin.shape[2]
-        self.OC = tin.shape[3]
+        assert in_channels == mean.shape[0], \
+        "Shape of mean must be equal to number of input channels, %d is not equal to %d" % (mean.shape[0], in_channels)
 
-        self.mean = mean 
-        assert self.mean.shape[0] == self.OC
-        self.variance = variance
-        assert self.variance.shape[0] == self.OC 
-        self.gamma = gamma
-        assert self.gamma.shape[0] == self.OC
-        self.epsilon = epsilon
+        assert in_channels == variance.shape[0], \
+        "Shape of variance must be equal to number of input channels, %d is not equal to %d" % (variance.shape[0], in_channels)
+
+        assert in_channels == gamma.shape[0], \
+        "Shape of gamma must be equal to number of input channels, %d is not equal to %d" % (gamma.shape[0], in_channels)
         
-        self.result = self.in_node.result
+        self.name = name
+        print(self.name)
 
-    def run(self, counter):
-        tin = self.in_node.result
-        self.result = np.zeros((1, self.OW, self.OH, self.OC))
-        for ow in range(0, self.OW):
-            for oh in range(0, self.OH):
-                for oc in range(0, self.OC):
-                    self.result[0][ow][oh][oc] \
-                        = (tin[0][ow][oh][oc] - self.mean[oc]) * self.gamma[oc] / \
-                            math.sqrt(self.variance[oc] + self.epsilon)
+        self.mean = mean
+        self.epsilon = epsilon
+        self.gamma = gamma
+        self.variance = variance
+        self.result = np.zeros(in_node.out_shape)
+        self.out_shape = self.result.shape
+        self.prev_res = np.zeros(in_node.out_shape)
+
+    def run(self):
+        self.prev_res = self.in_node.result
+        batch, output_height, output_width, out_channels = self.out_shape
+        std = np.sqrt(self.variance + self.epsilon)
+        for b in range(batch):
+            for h in range(output_height):
+                for w in range(output_width):
+                    for c in range(out_channels):
+                        self.result[b, h, w, c] = self.gamma[c] * (self.prev_res[b, h, w, c] - self.mean[c]) / std[c]
 
 class LeakyReLU(DnnNode):
     def __init__(self, name, in_node):
-        self.name = name
-
         self.in_node = in_node
+        batch, in_height, in_width, in_channels = in_node.out_shape
+        self.alpha = 0.1
+        self.name = name
+        print(self.name)
+        self.result=  np.zeros(in_node.out_shape)
+        self.out_shape = self.result.shape
 
-        tin = self.in_node.result
-        self.OW = tin.shape[1]
-        self.OH = tin.shape[2]
-        self.OC = tin.shape[3]
+    def run(self):
+        self.result = np.copy(self.in_node.result)
+        self.result[self.result < 0] *= self.alpha
 
-        self.result = self.in_node.result
 
-    def run(self, counter):
-        tin = self.in_node.result
-        self.result = np.zeros((1, self.OW, self.OH, self.OC))
-        for ow in range(0, self.OW):
-            for oh in range(0, self.OH):
-                for oc in range(0, self.OC):
-                    self.result[0][ow][oh][oc] = max(tin[0][ow][oh][oc], .1 * tin[0][ow][oh][oc])
-
+# Do not modify below
 class Input(DnnNode):
     def __init__(self, name, in_shape):
         self.name = name
+        # print(self.name)
         self.in_shape = in_shape 
-        self.result = np.ndarray(self.in_shape)
+        self.out_shape =in_shape
+        self.result = np.zeros(self.in_shape)
 
     def set_input(self, tensor):
         assert tuple(self.in_shape) == tuple(tensor.shape)
         self.result = tensor 
 
-    def run(self, counter):
+    def run(self):
         pass
-
-
