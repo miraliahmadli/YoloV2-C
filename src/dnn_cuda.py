@@ -232,12 +232,17 @@ class BiasAdd(DnnNode):
         self.out_shape = self.result.shape
 
     def run(self):
-        self.prev_res = self.in_node.result
-        batch, output_height, output_width, out_channels = self.out_shape
-        for b in range(batch):
-            for h in range(output_height):
-                for w in range(output_width):
-                    self.result[b, h, w, :] = self.prev_res[b, h, w, :] + self.biases
+        self.result = np.copy(self.in_node.result)
+        result = self.result.astype(c_double)
+        biases = self.biases.astype(c_double)
+        b, h, w, c = self.out_shape
+
+        func = mylib.add_bias
+        func.argtypes = [POINTER(c_double), POINTER(c_double), c_size_t, c_size_t, c_size_t]
+        res_p = result.ctypes.data_as(POINTER(c_double))
+        bias_p = biases.ctypes.data_as(POINTER(c_double))
+        func(res_p, bias_p, h, w, c)
+        self.result = result.astype("float64")
 
 
 class MaxPool2D(DnnNode):
@@ -334,7 +339,14 @@ class LeakyReLU(DnnNode):
 
     def run(self):
         self.result = np.copy(self.in_node.result)
-        self.result[self.result < 0] *= self.alpha
+        result = self.result.astype(c_double)
+        b, h, w, c = self.out_shape
+
+        func = mylib.leaky_relu
+        func.argtypes = [POINTER(c_double), c_size_t, c_size_t, c_size_t]
+        res_p = result.ctypes.data_as(POINTER(c_double))
+        func(res_p, h, w, c)
+        self.result = result.astype("float64")
 
 
 # Do not modify below

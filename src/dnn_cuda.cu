@@ -35,31 +35,41 @@ void print_mat(const char * name, int r, int c, double *m){
     Leaky RELU
 
 */
-__global__ void l_relu(double *res, int n){
-    int index = threadIdx.x + blockIdx.x * blockDim.x;
-    if (index < n && res[index] < 0.0f){
-        res[index] *= 0.1;
+__global__  void gpu_l_relu(double *res, int n, int k, int channel){
+    int row = blockIdx.y * blockDim.y + threadIdx.y; 
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int offset = blockIdx.z * n * k;
+    if( col < k && row < n) 
+    {
+        int index = offset + row * k + col;
+        if(res[index] < 0.0) res[index] *= 0.1;
     }
 }
 
 extern "C" {
-    void leaky_relu(double *res, int dim){
+    void leaky_relu(double *res, int n, int k, int channel){
+        // Allocate memory space on the device 
         double *dev_res;
-        int size = dim * sizeof(double);
+        cudaMalloc((void **) &dev_res, sizeof(double)*n*k*channel);
 
-        // allocate the memory on the GPU
-        HANDLE_ERROR( cudaMalloc( (void**)&dev_res,  size) );
-        
-        // copy the array 'res' to the GPU
-        HANDLE_ERROR( cudaMemcpy( dev_res, res, size, cudaMemcpyHostToDevice ) );
+        // copy matrix A and B from host to device memory
+        cudaMemcpy(dev_res, res, sizeof(double)*n*k*channel, cudaMemcpyHostToDevice);
 
-        l_relu<<<(dim + 512 -1) / 512, 512>>>(dev_res, dim);
+        unsigned int gridev_rows = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        unsigned int gridev_cols = (k + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        unsigned int channels = channel;
+        dim3 dimGrid(gridev_cols, gridev_rows, channels);
+        dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE);
     
-        // copy the array 'res' back from the GPU to the CPU
-        HANDLE_ERROR( cudaMemcpy( res, dev_res, size, cudaMemcpyDeviceToHost ) );
-    
-        // free the memory allocated on the GPU
-        cudaFree( dev_res );
+        // Launch kernel 
+        gpu_l_relu<<<dimGrid, dimBlock>>>(dev_res, n, k, channel);    
+
+        // Transefr results from device to host 
+        cudaMemcpy(res, dev_res, sizeof(double)*n*k*channel, cudaMemcpyDeviceToHost);
+        cudaDeviceSynchronize();
+
+        // free memory
+        cudaFree(dev_res);
     }
 }
 
@@ -125,39 +135,43 @@ extern "C" {
 
 */
 
-__global__ void dev_add_bias (double *res, double *bias, int size){
-    int index = threadIdx.x + blockIdx.x * blockDim.x;
-    if (index < size){
-        res[index] += bias[index];
+__global__ void gpu_add_bias (double *res, double *bias, int n, int k, int channel){
+    int row = blockIdx.y * blockDim.y + threadIdx.y; 
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int offset = blockIdx.z * n * k;
+    if( col < k && row < n) 
+    {
+        res[offset + row * k + col] += bias[blockIdx.z];
     }
 }
 
 extern "C" {
-    void add_bias(double * res, double * bias, int n){
-        double *dev_res, *dev_bias;
-        int size1 = n * sizeof(double);
-        // int size2 = n * size1;
-    
-        // allocate the memory on the GPU
-        HANDLE_ERROR( cudaMalloc( (void**)&dev_res, size1) );
-    
-        HANDLE_ERROR( cudaMalloc( (void**)&dev_bias, size1) );
-    
-        // copy the arrays to the GPU
-        HANDLE_ERROR( cudaMemcpy( dev_res, res, size1, cudaMemcpyHostToDevice ) );
-    
-        HANDLE_ERROR( cudaMemcpy( dev_bias, bias, size1, cudaMemcpyHostToDevice ) );
+    void add_bias(double * C, double * bias, int n, int k, int channel){
+        // Allocate memory space on the device 
+        double *dev_b, *dev_c;
+        cudaMalloc((void **) &dev_b, sizeof(double)*channel);
+        cudaMalloc((void **) &dev_c, sizeof(double)*n*k*channel);
 
-        // Kernel invocation
+        // copy matrix A and B from host to device memory
+        cudaMemcpy(dev_b, bias, sizeof(double)*channel, cudaMemcpyHostToDevice);
+        cudaMemcpy(dev_c, C, sizeof(double)*n*k*channel, cudaMemcpyHostToDevice);
 
-        dev_add_bias<<<(n + 1024 - 1) / 1024, 1024>>>(dev_res, dev_bias, n);
+        unsigned int gridev_rows = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        unsigned int gridev_cols = (k + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        unsigned int channels = channel;
+        dim3 dimGrid(gridev_cols, gridev_rows, channels);
+        dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE);
     
-        // copy the arrays back from the GPU to the CPU
-        HANDLE_ERROR( cudaMemcpy( res, dev_res, size1, cudaMemcpyDeviceToHost ) );
-    
-        // free the memory allocated on the GPU
-        cudaFree( dev_res );
-        cudaFree( dev_bias );
+        // Launch kernel 
+        gpu_add_bias<<<dimGrid, dimBlock>>>(dev_c, dev_b, n, k, channel);    
+
+        // Transefr results from device to host 
+        cudaMemcpy(C, dev_c, sizeof(double)*n*k*channel, cudaMemcpyDeviceToHost);
+        cudaDeviceSynchronize();
+
+        // free memory
+        cudaFree(dev_b);
+        cudaFree(dev_c);
     }
 }
 
@@ -172,7 +186,7 @@ extern "C" {
     Convolution
 
 */
-__global__ void multABtoC(double *a,double *b, double *c, int m, int n, int k)
+__global__ void gpu_multABtoC(double *a,double *b, double *c, int m, int n, int k)
 { 
     int row = blockIdx.y * blockDim.y + threadIdx.y; 
     int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -207,7 +221,7 @@ extern "C"{
         dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE);
     
         // Launch kernel 
-        multABtoC<<<dimGrid, dimBlock>>>(dev_a, dev_b, dev_c, m, n, k);    
+        gpu_multABtoC<<<dimGrid, dimBlock>>>(dev_a, dev_b, dev_c, m, n, k);    
 
         // Transefr results from device to host 
         cudaMemcpy(C, dev_c, sizeof(double)*m*k, cudaMemcpyDeviceToHost);
