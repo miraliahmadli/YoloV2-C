@@ -79,53 +79,54 @@ extern "C" {
     Batch Norm
 
 */
-__global__ void b_norm (double *res, double *mean, double *gamma, 
-                    double *variance, double epsilon, int n, int oc){
-    int index = threadIdx.x + blockIdx.x * blockDim.x;
-    int size = n*oc;
-    if (index < size){
-        int col = index % oc;
-        double divisor = sqrt(variance[col] + epsilon);
-        double divident = (res[index] - mean[col]) * gamma[col];
-        res[index] = divident / divisor;
+__global__ void gpu_b_norm (double *res, double *mean, double *gamma, 
+                    double *variance, int n, int k, int channel){
+    
+    int row = blockIdx.y * blockDim.y + threadIdx.y; 
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int offset = blockIdx.z * n * k;
+    if( col < k && row < n) {
+            int index = offset + row * k + col;
+            // double divisor = sqrt(variance[blockIdx.z] + epsilon);
+            double divident = gamma[blockIdx.z] * (res[index] - mean[blockIdx.z]);
+            res[index] = divident / variance[blockIdx.z];
     }
 }
 
 extern "C" {
     void batch_norm(double *res, double *mean, double *gamma, 
-                    double *variance, double epsilon, int n, int oc){
+                    double *variance, int n, int k, int channel){
+        // Allocate memory space on the device 
         double *dev_res, *dev_mean, *dev_gamma, *dev_variance;
-        int size1 = oc * sizeof(double);
-        int size2 = n * size1;
+        cudaMalloc((void **) &dev_res, sizeof(double)*n*k*channel);
 
-        // allocate the memory on the GPU
-        HANDLE_ERROR( cudaMalloc( (void**)&dev_res, size2 ) );
+        cudaMalloc((void **) &dev_mean, sizeof(double)*channel);
+        cudaMalloc((void **) &dev_gamma, sizeof(double)*channel);
+        cudaMalloc((void **) &dev_variance, sizeof(double)*channel);
 
-        HANDLE_ERROR( cudaMalloc( (void**)&dev_mean, size1) );
-        HANDLE_ERROR( cudaMalloc( (void**)&dev_gamma, size1 ) );
-        HANDLE_ERROR( cudaMalloc( (void**)&dev_variance, size1 ) );
-        
-        // HANDLE_ERROR( cudaMalloc( (void **)&dev_epsilon, sizeof(double) ) );
-        
-        // copy the arrays to the GPU
-        HANDLE_ERROR( cudaMemcpy( dev_res, res, size2, cudaMemcpyHostToDevice ) );
+        // copy matrix A and B from host to device memory
+        cudaMemcpy(dev_res, res, sizeof(double)*n*k*channel, cudaMemcpyHostToDevice);
 
-        HANDLE_ERROR( cudaMemcpy( dev_mean, mean, size1, cudaMemcpyHostToDevice ) );
-        HANDLE_ERROR( cudaMemcpy( dev_gamma, gamma, size1, cudaMemcpyHostToDevice ) );
-        HANDLE_ERROR( cudaMemcpy( dev_variance, variance, size1, cudaMemcpyHostToDevice ) );
+        cudaMemcpy(dev_mean, mean, sizeof(double)*channel, cudaMemcpyHostToDevice);
+        cudaMemcpy(dev_gamma, gamma, sizeof(double)*channel, cudaMemcpyHostToDevice);
+        cudaMemcpy(dev_variance, variance, sizeof(double)*channel, cudaMemcpyHostToDevice);
 
-        // Kernel invocation
-        b_norm<<<(size2 + size1-1) / size1, size1>>>(dev_res, dev_mean, 
-            dev_gamma, dev_variance, epsilon, n, oc);
+        unsigned int gridev_rows = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        unsigned int gridev_cols = (k + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        unsigned int channels = channel;
+        dim3 dimGrid(gridev_cols, gridev_rows, channels);
+        dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE);
+    
+        // Launch kernel 
+        gpu_b_norm<<<dimGrid, dimBlock>>>(dev_res, dev_mean, dev_gamma, dev_variance, 
+                                            n, k, channel);    
 
-        // copy the arrays back from the GPU to the CPU
-        HANDLE_ERROR( cudaMemcpy( res, dev_res, size2, cudaMemcpyDeviceToHost ) );
+        // Transefr results from device to host 
+        cudaMemcpy(res, dev_res, sizeof(double)*n*k*channel, cudaMemcpyDeviceToHost);
+        cudaDeviceSynchronize();
 
-        // free the memory allocated on the GPU
-        cudaFree( dev_res );
-        cudaFree( dev_mean );
-        cudaFree( dev_gamma );
-        cudaFree( dev_variance );
+        // free memory
+        cudaFree(dev_res);
     }
 }
 
@@ -180,6 +181,49 @@ extern "C" {
     MAX Pool
 
 */
+
+__global__ void gpu_max (double *res, double *cols, int n, int size){
+    int index = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (index < n)
+    {
+        int offset = index;
+        // printf("%d\n", offset);
+        double max = -10000.0;
+        for(int i =0; i<size; i++){
+            if(cols[offset + i*n] > max){
+                max = cols[offset + i*n];
+            } 
+        }
+        // printf("Max value for index %d: %.2lf\n", index, max);
+        res[index] = max;
+    }
+}
+
+extern "C" {
+    void maxpool(double * C, double * cols, int n, int size){
+        // Allocate memory space on the device 
+        double *dev_cols, *dev_c;
+
+        cudaMalloc((void **) &dev_cols, sizeof(double)*n*size);
+        cudaMalloc((void **) &dev_c, sizeof(double)*n);
+
+        // copy matrix A and B from host to device memory
+        cudaMemcpy(dev_cols, cols, sizeof(double)*n*size, cudaMemcpyHostToDevice);
+        cudaMemcpy(dev_c, C, sizeof(double)*n, cudaMemcpyHostToDevice);
+
+        // Launch kernel 
+        gpu_max<<<(n + 512 - 1)/512, 512>>>( dev_c, dev_cols, n, size);   
+
+        // Transefr results from device to host 
+        cudaMemcpy(C, dev_c, sizeof(double)*n, cudaMemcpyDeviceToHost);
+        cudaDeviceSynchronize();
+
+        // free memory
+        cudaFree(dev_cols);
+        cudaFree(dev_c);
+    }
+}
 
 /*
 

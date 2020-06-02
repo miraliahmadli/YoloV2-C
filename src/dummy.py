@@ -1,6 +1,6 @@
-# import numpy as np
-# import ctypes
-# from ctypes import *
+import numpy as np
+import ctypes
+from ctypes import *
 
 # prev_res = np.array(
 #     [
@@ -206,27 +206,27 @@ filt1 = np.array(
 )
 
 print(prev_res.shape)
-print(filt1.shape)
+# print(filt1.shape)
 
-res = conv_forward(prev_res, filt1, stride=1, padding=0)
-print(res)
-print(res.shape)
-print(res[0].shape)
-res = res.transpose(0, 2, 3, 1)
+# res = conv_forward(prev_res, filt1, stride=1, padding=0)
+# print(res)
+# print(res.shape)
+# print(res[0].shape)
+# res = res.transpose(0, 2, 3, 1)
 
 
-# First, reshape it to 50x1x28x28 to make im2col arranges it fully in column
-# n h w c
-X = X.transpose(0, 3, 1, 2)
-X_reshaped = X.reshape(n * d, 1, h, w)
+# # First, reshape it to 50x1x28x28 to make im2col arranges it fully in column
+# # n h w c
+# X = X.transpose(0, 3, 1, 2)
+# X_reshaped = X.reshape(n * d, 1, h, w)
 
-X_col = im2col_indices(X_reshaped, size, size, padding=0, stride=stride)
+# X_col = im2col_indices(X_reshaped, size, size, padding=0, stride=stride)
 
-max_idx = np.argmax(X_col, axis=0)
+# max_idx = np.argmax(X_col, axis=0)
 
-out = X_col[max_idx, range(max_idx.size)]
-out = out.reshape(h_out, w_out, n, d)
-out = out.transpose(2, 0, 1, 3)
+# out = X_col[max_idx, range(max_idx.size)]
+# out = out.reshape(h_out, w_out, n, d)
+# out = out.transpose(2, 0, 1, 3)
 
 
         # n, h, w, d = self.in_node.out_shape
@@ -262,3 +262,59 @@ out = out.transpose(2, 0, 1, 3)
 # res_p = result.ctypes.data_as(POINTER(c_float))
 # func(res_p, b*h*w*c)
 # self.result = result.astype("float64")
+# X = prev_res
+# n, d, h, w = prev_res.shape
+# size = 2
+# stride = 2
+# X_reshaped = X.reshape(n * d, 1, h, w)
+
+# # The result will be 4x9800
+# # Note if we apply im2col to our 5x10x28x28 input, the result won't be as nice: 40x980
+# X_col = im2col_indices(X_reshaped, size, size, padding=0, stride=stride)
+
+# # Next, at each possible patch location, i.e. at each column, we're taking the max index
+# max_idx = np.argmax(X_col, axis=0)
+
+# # Finally, we get all the max value at each column
+# # The result will be 1x9800
+# out = X_col[max_idx, range(max_idx.size)]
+
+# # Reshape to the output size: 14x14x5x10
+# out = out.reshape(2, 2, n, d)
+# print(out)
+# print("\n\n\n")
+
+# # Transpose to get 5x10x14x14 output
+# out = out.transpose(2, 3, 0, 1)
+# print(out)
+
+prev_res = np.array(
+    [
+        [1., 2., 3., 4.],
+        [-1., -2., -3., -4],
+        [10., 100., 1000., 10000.],
+        [-10., -100., -1000., -10000.]
+    ], dtype = c_double
+)
+
+print(prev_res.shape)
+print(prev_res)
+
+mylib = cdll.LoadLibrary('./cuda_lib.so')
+
+# func = mylib.maxpool2d
+# func.argtypes = [POINTER(c_float), POINTER(c_float), c_size_t, c_size_t,
+#                     c_size_t, c_size_t, c_size_t, c_size_t, c_size_t]
+# res_p = result.ctypes.data_as(POINTER(c_float))
+# prev_p = prev_res.ctypes.data_as(POINTER(c_float))
+
+# func(res_p, prev_p, 2, 2, 2, 2, 4, 4, 1)
+result = np.zeros((1, 4))
+result = result.astype(c_double)
+func = mylib.maxpool
+func.argtypes = [POINTER(c_double), POINTER(c_double), c_size_t, c_size_t]
+res_p = result.ctypes.data_as(POINTER(c_double))
+prev_p = prev_res.ctypes.data_as(POINTER(c_double))
+
+func(res_p, prev_p, 4, 4)
+print(result)
