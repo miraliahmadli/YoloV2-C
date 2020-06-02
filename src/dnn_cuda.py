@@ -7,6 +7,44 @@ import ctypes
 from ctypes import *
 mylib = cdll.LoadLibrary('./cuda_lib.so')
 
+'''
+    Reference: CS231n assignment 2 im2col
+'''
+def get_im2col_indices(x_shape, field_height, field_width, padding=1, stride=1):
+    # First figure out what the size of the output should be
+    N, C, H, W = x_shape
+    assert (H +  padding - field_height) % stride == 0
+    assert (W + padding - field_height) % stride == 0
+    out_height = (H + padding - field_height) / stride + 1
+    out_width = (W + padding - field_width) / stride + 1
+    out_height = int(out_height)
+    out_width = int(out_width)
+
+    i0 = np.repeat(np.arange(field_height), field_width)
+    i0 = np.tile(i0, C)
+    i1 = stride * np.repeat(np.arange(out_height), out_width)
+    j0 = np.tile(np.arange(field_width), field_height * C)
+    j1 = stride * np.tile(np.arange(out_width), out_height)
+    i = i0.reshape(-1, 1) + i1.reshape(1, -1)
+    j = j0.reshape(-1, 1) + j1.reshape(1, -1)
+
+    k = np.repeat(np.arange(C), field_height * field_width).reshape(-1, 1)
+
+    return (k, i, j)
+
+def im2col_indices(x, field_height, field_width, padding=1, stride=1):
+    """ An implementation of im2col based on some fancy indexing """
+    # Zero-pad the input
+    p = padding
+    x_padded = np.pad(x, ((0, 0), (0, 0), (p//2, p//2), ((p+1)//2, (p+1)//2)), mode='constant')
+    k, i, j = get_im2col_indices(x.shape, field_height, field_width, padding,
+                                 stride)
+
+    cols = x_padded[:, k, i, j]
+    C = x.shape[1]
+    cols = cols.transpose(1, 2, 0).reshape(field_height * field_width * C, -1)
+    return cols
+
 class DnnInferenceEngine(object):
     def __init__(self, graph, debug):
         self.g = graph
@@ -31,7 +69,7 @@ class DnnInferenceEngine(object):
                 current.run()
                 if i != 0:
                     tf_current = np.load("../../YoloTinyV2/intermediate/layer_{}.npy".format(i))
-                    print(np.sum(np.absolute(tf_current - current.result)))
+                    print("Layer{}: ".format(i),np.sum(np.absolute(tf_current - current.result)))
                 i+=1
                 if self.g.is_out_node(current):
                     out = current.result
@@ -126,7 +164,7 @@ class Conv2D(DnnNode):
         self.kernel = kernel
         self.padding = (padding == "SAME")
         self.strides = strides
-
+        
         self.pad_h = 0
         self.pad_w = 0
         if self.padding:
@@ -136,31 +174,48 @@ class Conv2D(DnnNode):
             self.pad_w = ((self.strides[2] - 1) * in_width + filter_width - self.strides[2])
         output_height  = int(((in_height - filter_height + self.pad_h) / self.strides[1]) + 1)
         output_width   = int(((in_width - filter_width + self.pad_w) / self.strides[2]) + 1)
-        self.prev_res = np.zeros((batch, in_height + self.pad_h, in_width + self.pad_w, in_channels))
+        # self.prev_res = np.zeros((batch, in_height + self.pad_h, in_width + self.pad_w, in_channels))
         self.result = np.zeros((batch, output_height, output_width, out_channels))
         self.out_shape = self.result.shape
         self.filter_height, self.filter_width, self.in_channels, out_channels = kernel.shape
 
     def run(self):
-        filter_height, filter_width, in_channels, out_channels = self.kernel.shape
-        batch, in_height, in_width, in_channels = self.in_node.out_shape
-        if self.pad_h == 0 and self.pad_w == 0:
-            self.prev_res = self.in_node.result
-        else:
-            self.prev_res[:, self.pad_h//2 : -((self.pad_h+1)//2), self.pad_w//2 : -((self.pad_w + 1)//2), :] = self.in_node.result
-        batch, output_height, output_width, out_channels = self.out_shape
+        h_filter, w_filter, d_filter, n_filters = self.kernel.shape
+        W = self.kernel.transpose(3, 2, 0, 1)
+        n_x, h_x, w_x, d_x = self.in_node.out_shape
+        X = self.in_node.result.transpose(0, 3, 1, 2)
+        padding = 0
+        if self.padding:
+            padding = (self.strides[1] - 1) * h_x + h_filter - self.strides[1]
 
-        for b in range(batch):
-            for i in range(output_height):
-                for j in range(output_width):
-                    for k in range(out_channels):
-                        # can be multiprocessed
-                        for h in range(filter_height):
-                            for w in range(filter_width):
-                                for q in range(in_channels):
-                                    self.result[b, i, j, k] += \
-                                        (self.prev_res[b, self.strides[1] * i + h, self.strides[2] * j + w, q] * 
-                                            self.kernel[h, w, q, k])
+        h_out = (h_x - h_filter + padding) / self.strides[1] + 1
+        w_out = (w_x - w_filter + padding) / self.strides[1] + 1
+        h_out, w_out = int(h_out), int(w_out)
+
+        X_col = im2col_indices(X, h_filter, w_filter, padding, stride=self.strides[1])
+        W_col = W.reshape(n_filters, -1)
+
+        A = W_col.astype(c_double)
+        B = X_col.astype(c_double)
+        m, n = W_col.shape
+        n1, k = X_col.shape
+        C = np.zeros((m, k)).astype(c_double)
+
+        assert n1==n, "Shapes do not match"
+
+        func = mylib.conv2d
+        func.argtypes = [POINTER(c_double), POINTER(c_double), POINTER(c_double),
+                        c_size_t, c_size_t, c_size_t]
+        A_p = A.ctypes.data_as(POINTER(c_double))
+        B_p = B.ctypes.data_as(POINTER(c_double))
+        C_p = C.ctypes.data_as(POINTER(c_double))
+        func(C_p, A_p, B_p, m, n, k)
+        out = C.astype("float64")
+
+        # out = W_col @ X_col
+        out = out.reshape(n_filters, h_out, w_out, n_x)
+        out = out.transpose(3, 1, 2, 0)
+        self.result = out
 
 
 class BiasAdd(DnnNode):
@@ -177,17 +232,12 @@ class BiasAdd(DnnNode):
         self.out_shape = self.result.shape
 
     def run(self):
-        self.result = np.copy(self.in_node.result)
-        result = self.result.astype(c_float)
-        bias = self.biases.astype(c_float)
-        b, h, w, c = self.out_shape
-
-        func = mylib.add_bias
-        func.argtypes = [POINTER(c_float), POINTER(c_float), c_size_t, c_size_t]
-        res_p = result.ctypes.data_as(POINTER(c_float))
-        bias_p = bias.ctypes.data_as(POINTER(c_float))
-        func(res_p, bias_p, b*h*w, c)
-        self.result = result.astype("float64")
+        self.prev_res = self.in_node.result
+        batch, output_height, output_width, out_channels = self.out_shape
+        for b in range(batch):
+            for h in range(output_height):
+                for w in range(output_width):
+                    self.result[b, h, w, :] = self.prev_res[b, h, w, :] + self.biases
 
 
 class MaxPool2D(DnnNode):
@@ -264,25 +314,13 @@ class BatchNorm(DnnNode):
         self.out_shape = self.result.shape
 
     def run(self):
-        self.result = np.copy(self.in_node.result)
-        result = self.result.astype(c_float)
-        mean = self.mean.astype(c_float)
-        gamma = self.gamma.astype(c_float)
-        variance = self.variance.astype(c_float)
-        b, h, w, c = self.out_shape
-        
-        func = mylib.batch_norm
-        func.argtypes = [POINTER(c_float), POINTER(c_float), POINTER(c_float), POINTER(c_float), 
-                        c_float, c_size_t, c_size_t]
-
-        res_p = result.ctypes.data_as(POINTER(c_float))
-        gamma_p = gamma.ctypes.data_as(POINTER(c_float))
-        variance_p = variance.ctypes.data_as(POINTER(c_float))
-        epsilon_p =  c_float(self.epsilon)
-        mean_p = mean.ctypes.data_as(POINTER(c_float))
-
-        func(res_p, mean_p, gamma_p, variance_p, epsilon_p, b*h*w, c)
-        self.result = result.astype("float64")
+        self.prev_res = self.in_node.result
+        batch, output_height, output_width, out_channels = self.out_shape
+        std = np.sqrt(self.variance + self.epsilon)
+        for b in range(batch):
+            for h in range(output_height):
+                for w in range(output_width):
+                    self.result[b, h, w, :] = self.gamma * (self.prev_res[b, h, w, :] - self.mean) / std
 
 class LeakyReLU(DnnNode):
     def __init__(self, name, in_node):
@@ -296,14 +334,7 @@ class LeakyReLU(DnnNode):
 
     def run(self):
         self.result = np.copy(self.in_node.result)
-        result = self.result.astype(c_float)
-        b, h, w, c = self.out_shape
-
-        func = mylib.leaky_relu
-        func.argtypes = [POINTER(c_float), c_size_t]
-        res_p = result.ctypes.data_as(POINTER(c_float))
-        func(res_p, b*h*w*c)
-        self.result = result.astype("float64")
+        self.result[self.result < 0] *= self.alpha
 
 
 # Do not modify below

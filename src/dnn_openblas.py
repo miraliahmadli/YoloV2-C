@@ -4,6 +4,44 @@ import math
 import networkx as nx
 import numpy as np
 
+'''
+    Reference: CS231n assignment 2 im2col
+'''
+def get_im2col_indices(x_shape, field_height, field_width, padding=1, stride=1):
+    # First figure out what the size of the output should be
+    N, C, H, W = x_shape
+    assert (H +  padding - field_height) % stride == 0
+    assert (W + padding - field_height) % stride == 0
+    out_height = (H + padding - field_height) / stride + 1
+    out_width = (W + padding - field_width) / stride + 1
+    out_height = int(out_height)
+    out_width = int(out_width)
+
+    i0 = np.repeat(np.arange(field_height), field_width)
+    i0 = np.tile(i0, C)
+    i1 = stride * np.repeat(np.arange(out_height), out_width)
+    j0 = np.tile(np.arange(field_width), field_height * C)
+    j1 = stride * np.tile(np.arange(out_width), out_height)
+    i = i0.reshape(-1, 1) + i1.reshape(1, -1)
+    j = j0.reshape(-1, 1) + j1.reshape(1, -1)
+
+    k = np.repeat(np.arange(C), field_height * field_width).reshape(-1, 1)
+
+    return (k, i, j)
+
+def im2col_indices(x, field_height, field_width, padding=1, stride=1):
+    """ An implementation of im2col based on some fancy indexing """
+    # Zero-pad the input
+    p = padding
+    x_padded = np.pad(x, ((0, 0), (0, 0), (p//2, p//2), ((p+1)//2, (p+1)//2)), mode='constant')
+    k, i, j = get_im2col_indices(x.shape, field_height, field_width, padding,
+                                 stride)
+
+    cols = x_padded[:, k, i, j]
+    C = x.shape[1]
+    cols = cols.transpose(1, 2, 0).reshape(field_height * field_width * C, -1)
+    return cols
+
 class DnnInferenceEngine(object):
     def __init__(self, graph):
         self.g = graph
@@ -134,25 +172,25 @@ class Conv2D(DnnNode):
         self.filter_height, self.filter_width, self.in_channels, out_channels = kernel.shape
 
     def run(self):
-        filter_height, filter_width, in_channels, out_channels = self.kernel.shape
-        batch, in_height, in_width, in_channels = self.in_node.out_shape
-        if self.pad_h == 0 and self.pad_w == 0:
-            self.prev_res = self.in_node.result
-        else:
-            self.prev_res[:, self.pad_h//2 : -((self.pad_h+1)//2), self.pad_w//2 : -((self.pad_w + 1)//2), :] = self.in_node.result
-        batch, output_height, output_width, out_channels = self.out_shape
+        h_filter, w_filter, d_filter, n_filters = self.kernel.shape
+        W = self.kernel.transpose(3, 2, 0, 1)
+        n_x, h_x, w_x, d_x = self.in_node.out_shape
+        X = self.in_node.result.transpose(0, 3, 1, 2)
+        padding = 0
+        if self.padding:
+            padding = (self.strides[1] - 1) * h_x + h_filter - self.strides[1]
 
-        for b in range(batch):
-            for i in range(output_height):
-                for j in range(output_width):
-                    for k in range(out_channels):
-                        # can be multiprocessed
-                        for h in range(filter_height):
-                            for w in range(filter_width):
-                                for q in range(in_channels):
-                                    self.result[b, i, j, k] += \
-                                        (self.prev_res[b, self.strides[1] * i + h, self.strides[2] * j + w, q] * 
-                                            self.kernel[h, w, q, k])
+        h_out = (h_x - h_filter + padding) / self.strides[1] + 1
+        w_out = (w_x - w_filter + padding) / self.strides[1] + 1
+        h_out, w_out = int(h_out), int(w_out)
+
+        X_col = im2col_indices(X, h_filter, w_filter, padding, stride=self.strides[1])
+        W_col = W.reshape(n_filters, -1)
+
+        out = W_col @ X_col
+        out = out.reshape(n_filters, h_out, w_out, n_x)
+        out = out.transpose(3, 1, 2, 0)
+        self.result = out
 
 class BiasAdd(DnnNode):
     def __init__(self, name, in_node, biases):
