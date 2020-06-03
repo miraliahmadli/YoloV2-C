@@ -5,7 +5,7 @@ import networkx as nx
 import numpy as np
 import ctypes
 from ctypes import *
-mylib = cdll.LoadLibrary('./cublas_lib.so')
+mylib = cdll.LoadLibrary('./openblas_lib.so')
 
 '''
     Reference: CS231n assignment 2 im2col
@@ -50,6 +50,9 @@ class DnnInferenceEngine(object):
         self.g = graph
 
     def run(self, tin):
+        print("-------------")
+        print("Using OpeBLAS")
+        print("-------------")
         self.g.in_node.set_input(tin)
         out = {}
         currents = [self.g.in_node]
@@ -232,12 +235,11 @@ class BiasAdd(DnnNode):
         self.prev_res= np.zeros(in_node.out_shape)
 
     def run(self):
-        self.prev_res = self.in_node.result
+        self.result = np.copy(self.in_node.result)
         batch, output_height, output_width, out_channels = self.out_shape
-        for b in range(batch):
-            for h in range(output_height):
-                for w in range(output_width):
-                    self.result[b, h, w, :] = self.prev_res[b, h, w, :] + self.biases
+        res = self.result.reshape(batch*output_height*output_width, out_channels)
+        res += self.biases
+        self.result = res.reshape(batch, output_height, output_width, out_channels)
 
 class MaxPool2D(DnnNode):
     def __init__(self, name, in_node, ksize, strides, padding):

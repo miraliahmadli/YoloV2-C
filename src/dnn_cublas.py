@@ -50,6 +50,9 @@ class DnnInferenceEngine(object):
         self.g = graph
 
     def run(self, tin):
+        print("-------------")
+        print("Using cuBLAS")
+        print("-------------")
         self.g.in_node.set_input(tin)
         out = {}
         currents = [self.g.in_node]
@@ -212,6 +215,7 @@ class Conv2D(DnnNode):
         func(C_p, A_p, B_p, m, n, k)
         out = C.astype("float64")
 
+        # out = W_col @ X_col
         out = out.reshape(n_filters, h_out, w_out, n_x)
         out = out.transpose(3, 1, 2, 0)
         self.result = out

@@ -50,6 +50,9 @@ class DnnInferenceEngine(object):
         self.g = graph
 
     def run(self, tin):
+        print("-------------")
+        print("Using CUDA")
+        print("-------------")
         self.g.in_node.set_input(tin)
         out = {}
         currents = [self.g.in_node]
@@ -279,7 +282,6 @@ class MaxPool2D(DnnNode):
         
     def run(self):
         n, h, w, d = self.in_node.out_shape
-        # if h%2 == 0:
         pad = 0
         if self.padding:
             # ((s-1) * x + k -s)/ 2
@@ -330,26 +332,6 @@ class BatchNorm(DnnNode):
         self.out_shape = self.result.shape
 
     def run(self):
-        # self.result = np.copy(self.in_node.result)
-        # std = np.sqrt(self.variance + self.epsilon)
-        # result = self.result.astype(c_double)
-        # mean = self.mean.astype(c_double)
-        # gamma = self.gamma.astype(c_double)
-        # # variance = self.variance.astype(c_double)
-        # stdev = std.astype(c_double)
-        # b, h, w, c = self.out_shape
-
-        # func = mylib.leaky_relu
-        # func.argtypes = [POINTER(c_double), POINTER(c_double), POINTER(c_double), 
-        #                 POINTER(c_double), c_size_t, c_size_t, c_size_t]
-        # res_p = result.ctypes.data_as(POINTER(c_double))
-        # gam_p = gamma.ctypes.data_as(POINTER(c_double))
-        # mean_p = mean.ctypes.data_as(POINTER(c_double))
-        # # var_p = variance.ctypes.data_as(POINTER(c_double))
-        # stdev_p = stdev.ctypes.data_as(POINTER(c_double))
-        # # func(res_p, mean_p, gam_p, var_p, self.epsilon, h, w, c)
-        # func(res_p, mean_p, gam_p, stdev_p, h, w, c)
-        # self.result = result.astype("float64")
         self.prev_res = self.in_node.result
         batch, output_height, output_width, out_channels = self.out_shape
         std = np.sqrt(self.variance + self.epsilon)

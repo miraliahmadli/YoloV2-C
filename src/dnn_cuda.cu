@@ -213,7 +213,7 @@ extern "C" {
         cudaMemcpy(dev_c, C, sizeof(double)*n, cudaMemcpyHostToDevice);
 
         // Launch kernel 
-        gpu_max<<<(n + 512 - 1)/512, 512>>>( dev_c, dev_cols, n, size);   
+        gpu_max<<<(n + 1024 - 1)/1024, 1024>>>( dev_c, dev_cols, n, size);   
 
         // Transefr results from device to host 
         cudaMemcpy(C, dev_c, sizeof(double)*n, cudaMemcpyDeviceToHost);
