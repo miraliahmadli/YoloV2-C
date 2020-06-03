@@ -36,7 +36,7 @@ def im2col_indices(x, field_height, field_width, padding=1, stride=1):
     """ An implementation of im2col based on some fancy indexing """
     # Zero-pad the input
     p = padding
-    x_padded = np.pad(x, ((0, 0), (0, 0), (p//2, (p+1)//2), (p//2, (p+1)//2)), mode='constant')
+    x_padded = np.pad(x, ((0, 0), (0, 0), (p//2, (p+1)//2), (p//2, (p+1)//2)), mode='constant', constant_values=-1e-7)
     k, i, j = get_im2col_indices(x.shape, field_height, field_width, padding,
                                  stride)
 
@@ -243,6 +243,11 @@ class BiasAdd(DnnNode):
         bias_p = biases.ctypes.data_as(POINTER(c_double))
         func(res_p, bias_p, h, w, c)
         self.result = result.astype("float64")
+        # self.result = np.copy(self.in_node.result)
+        # batch, output_height, output_width, out_channels = self.out_shape
+        # res = self.result.reshape(batch*output_height*output_width, out_channels)
+        # res += self.biases
+        # self.result = res.reshape(batch, output_height, output_width, out_channels)
 
 
 class MaxPool2D(DnnNode):
@@ -282,11 +287,7 @@ class MaxPool2D(DnnNode):
         X = self.in_node.result.transpose(0, 3, 1, 2)
         X_reshaped = X.reshape(n * d, 1, h, w)
 
-        if self.strides[1] == 1:
-            X_col = im2col_indices(X_reshaped, self.ksize[1], self.ksize[2], pad, self.strides[1])
-        else:
-            X_col = im2col_indices(X_reshaped, self.ksize[1], self.ksize[2], 2*(pad//2), self.strides[1])
-
+        X_col = im2col_indices(X_reshaped, self.ksize[1], self.ksize[2], pad, self.strides[1])
         _, h_out, w_out, _ = self.out_shape
         cols = X_col.astype(c_double)
         size, n_1 = X_col.shape
@@ -352,10 +353,10 @@ class BatchNorm(DnnNode):
         self.prev_res = self.in_node.result
         batch, output_height, output_width, out_channels = self.out_shape
         std = np.sqrt(self.variance + self.epsilon)
-        for b in range(batch):
-            for h in range(output_height):
-                for w in range(output_width):
-                    self.result[b, h, w, :] = self.gamma * (self.prev_res[b, h, w, :] - self.mean) / std
+        res = self.result.reshape(batch*output_height*output_width, out_channels)
+        prev_res = self.prev_res.reshape(batch*output_height*output_width, out_channels)
+        res = self.gamma * (prev_res - self.mean) / std
+        self.result = res.reshape(batch, output_height, output_width, out_channels)
 
 class LeakyReLU(DnnNode):
     def __init__(self, name, in_node):

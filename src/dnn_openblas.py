@@ -3,6 +3,9 @@ import sys
 import math
 import networkx as nx
 import numpy as np
+import ctypes
+from ctypes import *
+mylib = cdll.LoadLibrary('./cublas_lib.so')
 
 '''
     Reference: CS231n assignment 2 im2col
@@ -43,7 +46,7 @@ def im2col_indices(x, field_height, field_width, padding=1, stride=1):
     return cols
 
 class DnnInferenceEngine(object):
-    def __init__(self, graph):
+    def __init__(self, graph, debug):
         self.g = graph
 
     def run(self, tin):
@@ -51,6 +54,7 @@ class DnnInferenceEngine(object):
         out = {}
         currents = [self.g.in_node]
         done = set()
+        i = 0
         while (len(currents) != 0):
             nexts = []
             for current in currents:
@@ -63,6 +67,10 @@ class DnnInferenceEngine(object):
                 if skip_current:
                     continue
                 current.run()
+                if i != 0:
+                    tf_current = np.load("../../YoloTinyV2/intermediate/layer_{}.npy".format(i))
+                    print("Layer{}: ".format(i),np.sum(np.absolute(tf_current - current.result)))
+                i+=1
                 if self.g.is_out_node(current):
                     out = current.result
                 done.add(current)
@@ -187,7 +195,24 @@ class Conv2D(DnnNode):
         X_col = im2col_indices(X, h_filter, w_filter, padding, stride=self.strides[1])
         W_col = W.reshape(n_filters, -1)
 
-        out = W_col @ X_col
+        A = W_col.astype(c_double)
+        B = X_col.astype(c_double)
+        m, n = W_col.shape
+        n1, k = X_col.shape
+        C = np.zeros((m, k)).astype(c_double)
+
+        assert n1==n, "Shapes do not match"
+
+        func = mylib.conv2d
+        func.argtypes = [POINTER(c_double), POINTER(c_double), POINTER(c_double),
+                        c_size_t, c_size_t, c_size_t]
+        A_p = A.ctypes.data_as(POINTER(c_double))
+        B_p = B.ctypes.data_as(POINTER(c_double))
+        C_p = C.ctypes.data_as(POINTER(c_double))
+        func(C_p, A_p, B_p, m, n, k)
+        out = C.astype("float64")
+
+        # out = W_col @ X_col
         out = out.reshape(n_filters, h_out, w_out, n_x)
         out = out.transpose(3, 1, 2, 0)
         self.result = out
@@ -212,8 +237,7 @@ class BiasAdd(DnnNode):
         for b in range(batch):
             for h in range(output_height):
                 for w in range(output_width):
-                    for c in range(out_channels):
-                        self.result[b, h, w, :] = self.prev_res[b, h, w, :] + self.biases
+                    self.result[b, h, w, :] = self.prev_res[b, h, w, :] + self.biases
 
 class MaxPool2D(DnnNode):
     def __init__(self, name, in_node, ksize, strides, padding):
@@ -294,11 +318,10 @@ class BatchNorm(DnnNode):
         self.prev_res = self.in_node.result
         batch, output_height, output_width, out_channels = self.out_shape
         std = np.sqrt(self.variance + self.epsilon)
-        for b in range(batch):
-            for h in range(output_height):
-                for w in range(output_width):
-                    for c in range(out_channels):
-                        self.result[b, h, w, c] = self.gamma[c] * (self.prev_res[b, h, w, c] - self.mean[c]) / std[c]
+        res = self.result.reshape(batch*output_height*output_width, out_channels)
+        prev_res = self.prev_res.reshape(batch*output_height*output_width, out_channels)
+        res = self.gamma * (prev_res - self.mean) / std
+        self.result = res.reshape(batch, output_height, output_width, out_channels)
 
 class LeakyReLU(DnnNode):
     def __init__(self, name, in_node):

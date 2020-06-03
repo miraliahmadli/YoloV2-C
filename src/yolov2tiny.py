@@ -3,8 +3,10 @@ import sys
 import pickle
 import numpy as np
 # from dnn import DnnGraphBuilder, DnnInferenceEngine
-# from dnn_cuda import DnnGraphBuilder, DnnInferenceEngine
-from dnn_cublas import DnnGraphBuilder, DnnInferenceEngine
+from dnn_cuda import DnnGraphBuilder, DnnInferenceEngine
+# from dnn_cublas import DnnGraphBuilder, DnnInferenceEngine
+# from dnn_openblas import DnnGraphBuilder, DnnInferenceEngine
+# from dnn_avx import DnnGraphBuilder, DnnInferenceEngine
 
 class YOLO_V2_TINY(object):
 

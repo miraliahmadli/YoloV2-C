@@ -231,12 +231,11 @@ class BiasAdd(DnnNode):
         self.out_shape = self.result.shape
 
     def run(self):
-        self.prev_res = self.in_node.result
+        self.result = np.copy(self.in_node.result)
         batch, output_height, output_width, out_channels = self.out_shape
-        for b in range(batch):
-            for h in range(output_height):
-                for w in range(output_width):
-                    self.result[b, h, w, :] = self.prev_res[b, h, w, :] + self.biases
+        res = self.result.reshape(batch*output_height*output_width, out_channels)
+        res += self.biases
+        self.result = res.reshape(batch, output_height, output_width, out_channels)
 
 
 class MaxPool2D(DnnNode):
@@ -318,10 +317,10 @@ class BatchNorm(DnnNode):
         self.prev_res = self.in_node.result
         batch, output_height, output_width, out_channels = self.out_shape
         std = np.sqrt(self.variance + self.epsilon)
-        for b in range(batch):
-            for h in range(output_height):
-                for w in range(output_width):
-                    self.result[b, h, w, :] = self.gamma * (self.prev_res[b, h, w, :] - self.mean) / std
+        res = self.result.reshape(batch*output_height*output_width, out_channels)
+        prev_res = self.prev_res.reshape(batch*output_height*output_width, out_channels)
+        res = self.gamma * (prev_res - self.mean) / std
+        self.result = res.reshape(batch, output_height, output_width, out_channels)
 
 class LeakyReLU(DnnNode):
     def __init__(self, name, in_node):

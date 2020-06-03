@@ -1,8 +1,3 @@
-/*
- * Reference:
- * https://developer.nvidia.com/sites/default/files/akamai/cuda/files/Misc/mygpu.pdf
- */
-
 #include <cstdio>
 # include <stdio.h>
 # include <stdlib.h>
