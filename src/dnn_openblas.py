@@ -33,7 +33,7 @@ def im2col_indices(x, field_height, field_width, padding=1, stride=1):
     """ An implementation of im2col based on some fancy indexing """
     # Zero-pad the input
     p = padding
-    x_padded = np.pad(x, ((0, 0), (0, 0), (p//2, p//2), ((p+1)//2, (p+1)//2)), mode='constant')
+    x_padded = np.pad(x, ((0, 0), (0, 0), (p//2, (p+1)//2), (p//2, (p+1)//2)), mode='constant')
     k, i, j = get_im2col_indices(x.shape, field_height, field_width, padding,
                                  stride)
 
@@ -243,26 +243,27 @@ class MaxPool2D(DnnNode):
         self.out_shape = self.result.shape
         
     def run(self):
-        batch, in_height, in_width, in_channels = self.in_node.out_shape
-        pad_h = 0
-        pad_w = 0
+        n, h, w, d = self.in_node.out_shape
+        pad = 0
         if self.padding:
-            pad_h = self.ksize[1] - 1
-            pad_w = self.ksize[2] - 1
-            self.prev_res[:, pad_h//2 : -((pad_h+1)//2), pad_w//2 : -((pad_w+1)//2), :] = self.in_node.result
+            # ((s-1) * x + k -s)/ 2
+            pad = self.ksize[1] - 1
+        X = self.in_node.result.transpose(0, 3, 1, 2)
+        X_reshaped = X.reshape(n * d, 1, h, w)
+
+        if self.strides[1] == 1:
+            X_col = im2col_indices(X_reshaped, self.ksize[1], self.ksize[2], pad, self.strides[1])
         else:
-            self.prev_res = self.in_node.result
-        batch, in_height, in_width, in_channels = self.prev_res.shape
-        batch, output_height, output_width, out_channels = self.out_shape
+            X_col = im2col_indices(X_reshaped, self.ksize[1], self.ksize[2], 2*(pad//2), self.strides[1])
 
-        for b in range(batch):
-            for i in range(output_height):
-                for j in range(output_width):
-                    for c in range(out_channels):
-                        self.result[b, i, j, c] = \
-                            np.amax(self.prev_res[b, i * self.strides[1] : i * self.strides[1] + self.ksize[1], 
-                                    j * self.strides[2] : j * self.strides[2] + self.ksize[2], c])
+        _, h_out, w_out, _ = self.out_shape
 
+        max_idx = np.argmax(X_col, axis=0)
+        out = X_col[max_idx, range(max_idx.size)]
+
+        out = out.reshape(h_out, w_out, n, d)
+        out = out.transpose(2, 0, 1, 3)
+        self.result = out
 
 class BatchNorm(DnnNode):
     def __init__(self, name, in_node, mean, variance, gamma, epsilon):

@@ -5,7 +5,7 @@ import networkx as nx
 import numpy as np
 import ctypes
 from ctypes import *
-mylib = cdll.LoadLibrary('./cuda_lib.so')
+mylib = cdll.LoadLibrary('./cublas_lib.so')
 
 '''
     Reference: CS231n assignment 2 im2col
@@ -13,8 +13,8 @@ mylib = cdll.LoadLibrary('./cuda_lib.so')
 def get_im2col_indices(x_shape, field_height, field_width, padding=1, stride=1):
     # First figure out what the size of the output should be
     N, C, H, W = x_shape
-    assert (H +  padding - field_height) % stride == 0
-    assert (W + padding - field_height) % stride == 0
+    # assert (H +  padding - field_height) % stride == 0
+    # assert (W + padding - field_height) % stride == 0
     out_height = (H + padding - field_height) / stride + 1
     out_width = (W + padding - field_width) / stride + 1
     out_height = int(out_height)
@@ -36,7 +36,7 @@ def im2col_indices(x, field_height, field_width, padding=1, stride=1):
     """ An implementation of im2col based on some fancy indexing """
     # Zero-pad the input
     p = padding
-    x_padded = np.pad(x, ((0, 0), (0, 0), (p//2, p//2), ((p+1)//2, (p+1)//2)), mode='constant')
+    x_padded = np.pad(x, ((0, 0), (0, 0), (p//2, (p+1)//2), (p//2, (p+1)//2)), mode='constant')
     k, i, j = get_im2col_indices(x.shape, field_height, field_width, padding,
                                  stride)
 
@@ -195,7 +195,23 @@ class Conv2D(DnnNode):
         X_col = im2col_indices(X, h_filter, w_filter, padding, stride=self.strides[1])
         W_col = W.reshape(n_filters, -1)
 
-        out = W_col @ X_col
+        A = W_col.astype(c_double)
+        B = X_col.astype(c_double)
+        m, n = W_col.shape
+        n1, k = X_col.shape
+        C = np.zeros((m, k)).astype(c_double)
+
+        assert n1==n, "Shapes do not match"
+
+        func = mylib.conv2d
+        func.argtypes = [POINTER(c_double), POINTER(c_double), POINTER(c_double),
+                        c_size_t, c_size_t, c_size_t]
+        A_p = A.ctypes.data_as(POINTER(c_double))
+        B_p = B.ctypes.data_as(POINTER(c_double))
+        C_p = C.ctypes.data_as(POINTER(c_double))
+        func(C_p, A_p, B_p, m, n, k)
+        out = C.astype("float64")
+
         out = out.reshape(n_filters, h_out, w_out, n_x)
         out = out.transpose(3, 1, 2, 0)
         self.result = out
@@ -251,25 +267,27 @@ class MaxPool2D(DnnNode):
         self.out_shape = self.result.shape
         
     def run(self):
-        batch, in_height, in_width, in_channels = self.in_node.out_shape
-        pad_h = 0
-        pad_w = 0
+        n, h, w, d = self.in_node.out_shape
+        pad = 0
         if self.padding:
-            pad_h = self.ksize[1] - 1
-            pad_w = self.ksize[2] - 1
-            self.prev_res[:, pad_h//2 : -((pad_h+1)//2), pad_w//2 : -((pad_w+1)//2), :] = self.in_node.result
-        else:
-            self.prev_res = self.in_node.result
-        batch, in_height, in_width, in_channels = self.prev_res.shape
-        batch, output_height, output_width, out_channels = self.out_shape
+            # ((s-1) * x + k -s)/ 2
+            pad = self.ksize[1] - 1
+        X = self.in_node.result.transpose(0, 3, 1, 2)
+        X_reshaped = X.reshape(n * d, 1, h, w)
 
-        for b in range(batch):
-            for i in range(output_height):
-                for j in range(output_width):
-                    for c in range(out_channels):
-                        self.result[b, i, j, c] = \
-                            np.amax(self.prev_res[b, i * self.strides[1] : i * self.strides[1] + self.ksize[1], 
-                                    j * self.strides[2] : j * self.strides[2] + self.ksize[2], c])
+        if self.strides[1] == 1:
+            X_col = im2col_indices(X_reshaped, self.ksize[1], self.ksize[2], pad, self.strides[1])
+        else:
+            X_col = im2col_indices(X_reshaped, self.ksize[1], self.ksize[2], 2*(pad//2), self.strides[1])
+
+        _, h_out, w_out, _ = self.out_shape
+
+        max_idx = np.argmax(X_col, axis=0)
+        out = X_col[max_idx, range(max_idx.size)]
+
+        out = out.reshape(h_out, w_out, n, d)
+        out = out.transpose(2, 0, 1, 3)
+        self.result = out
 
 
 class BatchNorm(DnnNode):
