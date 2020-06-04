@@ -203,22 +203,28 @@ class Conv2D(DnnNode):
         m, n = W_col.shape
         n1, k = X_col.shape
 
-        m, n = W_col.shape
-        n1, k = X_col.shape
         assert n1==n, "Shapes do not match"
+        X_col_tr = X_col.T
+        pad = n%4
+        if pad!=0:
+            pad = 4 - pad
+        W_col_padded = np.pad(W_col, ((0, 0), (0, pad)), 
+                                mode='constant', constant_values=0.0)
+        X_col_padded = np.pad(X_col_tr, ((0, 0), (0, pad)), 
+                                mode='constant', constant_values=0.0)
 
-        A = W_col.astype(c_double)
+        A = W_col_padded.astype(c_double)
         A_p = A.ctypes.data_as(POINTER(c_double))
 
         func = mylib.conv2d
         func.argtypes = [POINTER(c_double), POINTER(c_double), POINTER(c_double),
                             c_size_t, c_size_t, c_size_t]
 
-        B = X_col.astype(c_double)
+        B = X_col_padded.astype(c_double)
         C = np.zeros((m, k)).astype(c_double)
         B_p = B.ctypes.data_as(POINTER(c_double))
         C_p = C.ctypes.data_as(POINTER(c_double))
-        func(C_p, A_p, B_p, m, n, k)
+        func(C_p, A_p, B_p, m, n + pad, k)
         out = C.astype("float64")
 
         out = out.reshape(n_filters, h_out, w_out, n_x)
