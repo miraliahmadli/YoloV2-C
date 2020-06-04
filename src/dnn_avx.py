@@ -178,8 +178,10 @@ class Conv2D(DnnNode):
         output_height  = int(((in_height - filter_height + self.pad_h) / self.strides[1]) + 1)
         output_width   = int(((in_width - filter_width + self.pad_w) / self.strides[2]) + 1)
         # self.prev_res = np.zeros((batch, in_height + self.pad_h, in_width + self.pad_w, in_channels))
-        self.result = np.zeros((batch, output_height, output_width, out_channels))
-        self.out_shape = self.result.shape
+        # self.result = np.zeros((batch, output_height, output_width, out_channels))
+        self.result = None
+        # self.out_shape = self.result.shape
+        self.out_shape = (batch, output_height, output_width, out_channels)
         self.filter_height, self.filter_width, self.in_channels, out_channels = kernel.shape
 
     def run(self):
@@ -198,24 +200,33 @@ class Conv2D(DnnNode):
         X_col = im2col_indices(X, h_filter, w_filter, padding, stride=self.strides[1])
         W_col = W.reshape(n_filters, -1)
 
-        A = W_col.astype(c_double)
-        B = X_col.astype(c_double)
         m, n = W_col.shape
         n1, k = X_col.shape
-        C = np.zeros((m, k)).astype(c_double)
 
-        assert n1==n, "Shapes do not match"
+        if self.name[-1] in"78":
+            print(W_col.shape, X_col.shape)
+            m, n = W_col.shape
+            n1, k = X_col.shape
+            assert n1==n, "Shapes do not match"
 
-        func = mylib.conv2d
-        func.argtypes = [POINTER(c_double), POINTER(c_double), POINTER(c_double),
-                        c_size_t, c_size_t, c_size_t]
-        A_p = A.ctypes.data_as(POINTER(c_double))
-        B_p = B.ctypes.data_as(POINTER(c_double))
-        C_p = C.ctypes.data_as(POINTER(c_double))
-        func(C_p, A_p, B_p, m, n, k)
-        out = C.astype("float64")
+            A = W_col.astype(c_double)
+            A_p = A.ctypes.data_as(POINTER(c_double))
+
+            func = mylib.conv2d
+            func.argtypes = [POINTER(c_double), POINTER(c_double), POINTER(c_double),
+                                c_size_t, c_size_t, c_size_t]
+
+            B = X_col.astype(c_double)
+            C = np.zeros((m, k)).astype(c_double)
+            B_p = B.ctypes.data_as(POINTER(c_double))
+            C_p = C.ctypes.data_as(POINTER(c_double))
+            func(C_p, A_p, B_p, m, n, k)
+            out = C.astype("float64")
+        else:
+            out = W_col @ X_col
 
         # out = W_col @ X_col
+        # print(out[0][:10])
         print(out.shape)
         out = out.reshape(n_filters, h_out, w_out, n_x)
         out = out.transpose(3, 1, 2, 0)
