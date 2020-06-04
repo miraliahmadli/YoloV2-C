@@ -202,9 +202,10 @@ class Conv2D(DnnNode):
         B = X_col.astype(c_double)
         m, n = W_col.shape
         n1, k = X_col.shape
-        C = np.zeros((m, k)).astype(c_double)
 
         assert n1==n, "Shapes do not match"
+
+        C = np.zeros((m, k)).astype(c_double)
 
         func = mylib.conv2d
         func.argtypes = [POINTER(c_double), POINTER(c_double), POINTER(c_double),
