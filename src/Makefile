@@ -12,7 +12,7 @@
 
 # AVX
 avx_lib.so: dnn_avx.c
-	gcc -shared -fPIC -o $@ $^ -mavx2
+	gcc -shared -fPIC -o $@ $^ -mavx2 -pthread
 
 clean:
 	rm -f cublas_lib.so cuda_lib.so openblas_lib.so avx_lib.so
