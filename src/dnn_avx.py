@@ -13,8 +13,8 @@ mylib = cdll.LoadLibrary('./avx_lib.so')
 def get_im2col_indices(x_shape, field_height, field_width, padding=1, stride=1):
     # First figure out what the size of the output should be
     N, C, H, W = x_shape
-    assert (H +  padding - field_height) % stride == 0
-    assert (W + padding - field_height) % stride == 0
+    # assert (H +  padding - field_height) % stride == 0
+    # assert (W + padding - field_height) % stride == 0
     out_height = (H + padding - field_height) / stride + 1
     out_width = (W + padding - field_width) / stride + 1
     out_height = int(out_height)
@@ -58,7 +58,7 @@ class DnnInferenceEngine(object):
         out = {}
         currents = [self.g.in_node]
         done = set()
-        # i = 0
+        i = 0
         while (len(currents) != 0):
             nexts = []
             for current in currents:
@@ -73,10 +73,10 @@ class DnnInferenceEngine(object):
                 current.run()
                 if self.debug:
                     np.save("../intermediate/{}.npy".format(current.name), current.result)
-                # if i != 0:
-                #     tf_current = np.load("../../YoloTinyV2/intermediate/layer_{}.npy".format(i))
-                #     print("Layer{}: ".format(i),np.sum(np.absolute(tf_current - current.result)))
-                # i+=1
+                if i != 0:
+                    tf_current = np.load("../../YoloTinyV2/intermediate/layer_{}.npy".format(i))
+                    print("Layer{}: ".format(i),np.sum(np.absolute(tf_current - current.result)))
+                i+=1
                 if self.g.is_out_node(current):
                     out = current.result
                 done.add(current)
@@ -292,15 +292,23 @@ class MaxPool2D(DnnNode):
         X = self.in_node.result.transpose(0, 3, 1, 2)
         X_reshaped = X.reshape(n * d, 1, h, w)
 
-        if self.strides[1] == 1:
-            X_col = im2col_indices(X_reshaped, self.ksize[1], self.ksize[2], pad, self.strides[1])
-        else:
-            X_col = im2col_indices(X_reshaped, self.ksize[1], self.ksize[2], 2*(pad//2), self.strides[1])
+        X_col = im2col_indices(X_reshaped, self.ksize[1], self.ksize[2], pad, self.strides[1])
 
         _, h_out, w_out, _ = self.out_shape
 
-        max_idx = np.argmax(X_col, axis=0)
-        out = X_col[max_idx, range(max_idx.size)]
+        cols = X_col.astype(c_double)
+        size, n_1 = X_col.shape
+        C = np.zeros((n_1, )).astype(c_double)
+
+        func = mylib.maxpool
+        func.argtypes = [POINTER(c_double), POINTER(c_double), c_size_t, c_size_t]
+        cols_p = cols.ctypes.data_as(POINTER(c_double))
+        C_p = C.ctypes.data_as(POINTER(c_double))
+        func(C_p, cols_p, size, n_1)
+        out = C.astype("float64")
+
+        # max_idx = np.argmax(X_col, axis=0)
+        # out = X_col[max_idx, range(max_idx.size)]
 
         out = out.reshape(h_out, w_out, n, d)
         out = out.transpose(2, 0, 1, 3)

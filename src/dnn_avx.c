@@ -11,6 +11,81 @@ double *A_p;
 double *B_p;
 int M, N, K;
 
+void *maximum(void* arg)
+{
+    int *data = (int *)arg;
+    double max = -1000000.0;
+    int i = 0, j =0;
+
+    int col = *data;
+    double p[BLOCK];
+    for (j = 0; j < BLOCK; j++){
+        max = -1000000.0;
+        for (i = 0; i < M; i++){
+            if(A_p[col + j + i*N] > max) max = A_p[col + j + i*N];
+        }
+        p[j] = max;
+    }
+    free(arg);
+    pthread_exit(p);
+}
+
+void maxpool(double* C, double *cols, int M_p, int N_p){
+    M = M_p; N = N_p;
+    A_p = (double *)malloc(M*N*sizeof(double));
+    int size = N;
+    BLOCK = 169;
+    NUM_THR = size / BLOCK;
+    int i, j;
+  
+    for(i = 0; i < M*N; i++) A_p[i] = cols[i];
+
+    pthread_t *threads;
+    threads = (pthread_t*)malloc(NUM_THR*sizeof(pthread_t));
+    int counter = 0;
+    for (j = 0; j < N; j = j + BLOCK){
+        int *data;
+        data = calloc(1,sizeof(int));
+        *data = j;
+        if(pthread_create(&threads[counter++], NULL, maximum, (void*)data) != 0){
+            printf("Create failed at %d %d\n", i, j);
+            exit(-1);
+            return;
+        }
+    }
+    double *res;
+    for (i = 0; i < NUM_THR; i++) {
+        void *k;
+        pthread_join(threads[i], &k);
+        res = k;
+        j = 0;
+        while(j < BLOCK){
+            C[i * BLOCK + j] = res[j];
+            j++;
+        }
+    }
+    double max ;
+    for(j = 0; j < N; j++){
+        max = -1000.0;
+        for(int i =0; i<M; i++){
+            if(cols[j + i*N] > max){
+                max = cols[j + i*N];
+            } 
+        }
+        if(C[j] - max > 0.01){
+            printf("FAILED at C[%d], %f is not %f", j, max, C[j]);
+            exit(-1);
+        }
+    }
+    
+    free(A_p);
+}
+
+/*
+
+    Convolution
+
+*/
 void *mult(void* arg)
 {
     int *data = (int *)arg;
