@@ -58,7 +58,7 @@ class DnnInferenceEngine(object):
         out = {}
         currents = [self.g.in_node]
         done = set()
-        i = 0
+        # i = 0
         while (len(currents) != 0):
             nexts = []
             for current in currents:
@@ -73,10 +73,10 @@ class DnnInferenceEngine(object):
                 current.run()
                 if self.debug:
                     np.save("../intermediate/{}.npy".format(current.name), current.result)
-                if i != 0:
-                    tf_current = np.load("../../YoloTinyV2/intermediate/layer_{}.npy".format(i))
-                    print("Layer{}: ".format(i),np.sum(np.absolute(tf_current - current.result)))
-                i+=1
+                # if i != 0:
+                #     tf_current = np.load("../../YoloTinyV2/intermediate/layer_{}.npy".format(i))
+                #     print("Layer{}: ".format(i),np.sum(np.absolute(tf_current - current.result)))
+                # i+=1
                 if self.g.is_out_node(current):
                     out = current.result
                 done.add(current)
